@@ -462,8 +462,8 @@ function main() {
         newClient
 
         echo ""
-        echo "OpenVPN has been installed and configured."
-        echo "You can now use the management menu to add or revoke clients."
+        log_message "OpenVPN has been installed and configured."
+        log_message "You can now use the management menu to add or revoke clients."
     fi
 }
 
