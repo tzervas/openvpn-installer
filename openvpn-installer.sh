@@ -16,20 +16,22 @@
 
 set -euo pipefail
 
-# Global variables
-OPENVPN_VERSION="2.5.9"
-EASYRSA_VERSION="3.1.6"
-OPENVPN_DOWNLOAD_URL="https://swupdate.openvpn.org/community/releases/openvpn-$OPENVPN_VERSION.tar.gz"
-OPENVPN_SHA256="9d3379d00a62575aad981ce4d90240efc63a8ba0d9a9e87bb12e0d465d4d3f97"
-EASYRSA_DOWNLOAD_URL="https://github.com/OpenVPN/easy-rsa/releases/download/v$EASYRSA_VERSION/EasyRSA-$EASYRSA_VERSION.tgz"
-EASYRSA_SHA256="41d026bad2eef1520ae6613598f9e1e1be0e6c0c8f0fdc9ed7c58873a8e57cc2"
+# Global constants
+readonly OPENVPN_VERSION="2.5.9"
+readonly EASYRSA_VERSION="3.1.6"
 
-# Function to log messages
+# Global variables
+USE_LATEST_VERSIONS=false
+OPENVPN_DOWNLOAD_URL=""
+EASYRSA_DOWNLOAD_URL=""
+OPENVPN_SHA256=""
+EASYRSA_SHA256=""
+
+# Utility functions
 function log_message() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
 }
 
-# Function to check if script is run as root
 function check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_message "This script must be run as root" >&2
@@ -37,7 +39,6 @@ function check_root() {
     fi
 }
 
-# Function to check if TUN device is available
 function check_tun() {
     if [[ ! -e /dev/net/tun ]]; then
         log_message "TUN is not available" >&2
@@ -45,7 +46,6 @@ function check_tun() {
     fi
 }
 
-# Function to check OS
 function check_os() {
     if [[ ! -e /etc/rocky-release ]]; then
         log_message "This script is only for Rocky Linux 9.4 or later." >&2
@@ -58,28 +58,88 @@ function check_os() {
     fi
 }
 
-# Function to get public IP
 function get_public_ip() {
     IP=$(curl -s https://api.ipify.org)
 }
 
-# Function to ensure base packages are installed
+function get_latest_openvpn_version() {
+    local latest_version
+    latest_version=$(curl -s https://api.github.com/repos/OpenVPN/openvpn/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')
+    if [[ -n "$latest_version" ]]; then
+        echo "${latest_version#v}"
+    else
+        echo "$OPENVPN_VERSION"
+    fi
+}
+
+function get_latest_easyrsa_version() {
+    local latest_version
+    latest_version=$(curl -s https://api.github.com/repos/OpenVPN/easy-rsa/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')
+    if [[ -n "$latest_version" ]]; then
+        echo "${latest_version#v}"
+    else
+        echo "$EASYRSA_VERSION"
+    fi
+}
+
+function prompt_use_latest_versions() {
+    read -p "Do you want to use the latest versions of OpenVPN and EasyRSA? (y/n): " response
+    case $response in
+        [Yy]* ) USE_LATEST_VERSIONS=true;;
+        * ) USE_LATEST_VERSIONS=false;;
+    esac
+}
+
+function get_sha256_checksum() {
+    local url=$1
+    local filename=$(basename "$url")
+    local checksum=$(curl -sL "$url.sha256" | awk '{print $1}')
+    if [[ -z "$checksum" ]]; then
+        log_message "Failed to retrieve SHA256 checksum for $filename" >&2
+        return 1
+    fi
+    echo "$checksum"
+}
+
+function setup_download_info() {
+    if $USE_LATEST_VERSIONS; then
+        OPENVPN_VERSION=$(get_latest_openvpn_version)
+        EASYRSA_VERSION=$(get_latest_easyrsa_version)
+        log_message "Using latest versions:"
+    else
+        log_message "Using default versions:"
+    fi
+
+    log_message "OpenVPN version: $OPENVPN_VERSION"
+    log_message "EasyRSA version: $EASYRSA_VERSION"
+
+    OPENVPN_DOWNLOAD_URL="https://swupdate.openvpn.org/community/releases/openvpn-${OPENVPN_VERSION}.tar.gz"
+    EASYRSA_DOWNLOAD_URL="https://github.com/OpenVPN/easy-rsa/releases/download/v${EASYRSA_VERSION}/EasyRSA-${EASYRSA_VERSION}.tgz"
+
+    OPENVPN_SHA256=$(get_sha256_checksum "$OPENVPN_DOWNLOAD_URL")
+    EASYRSA_SHA256=$(get_sha256_checksum "$EASYRSA_DOWNLOAD_URL")
+
+    if [[ -z "$OPENVPN_SHA256" || -z "$EASYRSA_SHA256" ]]; then
+        log_message "Failed to retrieve checksums. Exiting." >&2
+        exit 1
+    fi
+}
+
 function ensure_base_packages() {
     log_message "Checking and installing necessary base packages..."
-    local packages=(
-        "curl"
-        "wget"
-        "ca-certificates"
-        "openssl"
-        "dnf-plugins-core"
-        "tar"
-        "which"
-    )
+    readarray -t packages <<EOF
+curl
+wget
+ca-certificates
+openssl
+dnf-plugins-core
+tar
+which
+EOF
 
     dnf install -y "${packages[@]}"
 }
 
-# Function to check and install EPEL
 function install_epel() {
     if ! rpm -qa | grep -q epel-release; then
         log_message "Installing EPEL repository..."
@@ -89,7 +149,6 @@ function install_epel() {
     fi
 }
 
-# Function to securely download and verify files
 function secure_download() {
     local url=$1
     local output=$2
@@ -113,20 +172,6 @@ function secure_download() {
     log_message "$output downloaded and verified successfully"
 }
 
-# Function to install OpenVPN and Easy-RSA from repositories
-function install_from_repo() {
-    log_message "Installing OpenVPN and Easy-RSA from repositories..."
-    dnf install -y openvpn-$OPENVPN_VERSION easy-rsa-$EASYRSA_VERSION
-}
-
-# Function to install build tools
-function install_build_tools() {
-    log_message "Installing build tools..."
-    dnf groupinstall -y "Development Tools"
-    dnf install -y openssl-devel lzo-devel pam-devel
-}
-
-# Function to compile and install OpenVPN from source
 function install_from_source() {
     log_message "Compiling and installing OpenVPN from source..."
 
@@ -155,7 +200,17 @@ function install_from_source() {
     rm EasyRSA-$EASYRSA_VERSION.tgz
 }
 
-# Function to choose installation method
+function install_from_repo() {
+    log_message "Installing OpenVPN and Easy-RSA from repositories..."
+    dnf install -y openvpn-$OPENVPN_VERSION easy-rsa-$EASYRSA_VERSION
+}
+
+function install_build_tools() {
+    log_message "Installing build tools..."
+    dnf groupinstall -y "Development Tools"
+    dnf install -y openssl-devel lzo-devel pam-devel
+}
+
 function choose_install_method() {
     echo "Install OpenVPN from: "
     echo "1) Repositories (default)"
@@ -167,7 +222,6 @@ function choose_install_method() {
     esac
 }
 
-# Function to install OpenVPN
 function install_openvpn() {
     install_epel
 
@@ -178,7 +232,7 @@ function install_openvpn() {
         install_choice=$INSTALL_METHOD
     fi
 
-    if [ $install_choice -eq 2 ]; then
+    if [[ $install_choice -eq 2 ]]; then
         install_build_tools
         install_from_source
     else
@@ -190,7 +244,6 @@ function install_openvpn() {
     sysctl --system
 }
 
-# Function to generate OpenVPN server config
 function generate_server_config() {
     log_message "Generating server config..."
     cat > /etc/openvpn/server.conf <<EOF
@@ -227,7 +280,6 @@ verb 3
 EOF
 }
 
-# Function to generate certificates
 function generate_certificates() {
     log_message "Generating certificates..."
     mkdir -p /etc/openvpn/easy-rsa
@@ -246,7 +298,6 @@ function generate_certificates() {
     cp pki/{ca.crt,private/ca.key,issued/server.crt,private/server.key,crl.pem} /etc/openvpn
 }
 
-# Function to configure firewall
 function configure_firewall() {
     log_message "Configuring firewall..."
     firewall-cmd --permanent --add-port=${SERVER_PORT:-1194}/${PROTOCOL:-udp}
@@ -254,14 +305,12 @@ function configure_firewall() {
     firewall-cmd --reload
 }
 
-# Function to start OpenVPN
 function start_openvpn() {
     log_message "Starting OpenVPN..."
     systemctl enable openvpn@server
     systemctl start openvpn@server
 }
 
-# Function to create client config
 function create_client_config() {
     log_message "Creating client config..."
     mkdir -p /etc/openvpn/clients
@@ -299,13 +348,27 @@ EOF
     echo "</tls-crypt>" >> /etc/openvpn/clients/client.ovpn
 }
 
-# Main function
+function cleanup() {
+    log_message "Cleaning up temporary files..."
+    rm -f openvpn-*.tar.gz EasyRSA-*.tgz
+}
+
+function check_version() {
+    if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
+        log_message "This script requires Bash version 4 or higher" >&2
+        exit 1
+    fi
+}
+
 function main() {
+    check_version
     check_root
     check_tun
     check_os
     ensure_base_packages
     get_public_ip
+    prompt_use_latest_versions
+    setup_download_info
     install_openvpn
     generate_server_config
     generate_certificates
@@ -317,10 +380,12 @@ function main() {
     log_message "Client configuration is available at /etc/openvpn/clients/client.ovpn"
 }
 
+# Set trap for cleanup
+trap cleanup EXIT
+
 # Check if a config file is provided
 if [[ -f "$1" ]]; then
     source "$1"
 fi
 
-# Run main function
 main
