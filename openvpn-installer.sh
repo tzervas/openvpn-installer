@@ -299,6 +299,149 @@ EOF
     echo "</tls-crypt>" >> /etc/openvpn/clients/client.ovpn
 }
 
+# Function to create a new client
+function newClient() {
+    echo ""
+    echo "Tell me a name for the client."
+    echo "The name must consist of alphanumeric characters, or it may also include an underscore or a dash."
+
+    until [[ $CLIENT =~ ^[a-zA-Z0-9_-]+$ ]]; do
+        read -rp "Client name: " -e CLIENT
+    done
+
+    echo ""
+    echo "Do you want to protect the configuration file with a password?"
+    echo "(e.g. encrypt the private key with a password)"
+    echo "   1) Add a passwordless client"
+    echo "   2) Use a password for the client"
+
+    until [[ $PASS =~ ^[1-2]$ ]]; do
+        read -rp "Select an option [1-2]: " -e -i 1 PASS
+    done
+
+    cd /etc/openvpn/easy-rsa/ || return
+    case $PASS in
+    1)
+        ./easyrsa --batch build-client-full "$CLIENT" nopass
+        ;;
+    2)
+        echo "⚠️ You will be asked for the client password below ⚠️"
+        ./easyrsa --batch build-client-full "$CLIENT"
+        ;;
+    esac
+
+    # Generate the custom client.ovpn
+    homeDir="/root"
+    cp /etc/openvpn/clients/client.ovpn "$homeDir/$CLIENT.ovpn"
+    {
+        echo "<ca>"
+        cat "/etc/openvpn/ca.crt"
+        echo "</ca>"
+        echo "<cert>"
+        sed -ne '/BEGIN CERTIFICATE/,$ p' "/etc/openvpn/easy-rsa/pki/issued/$CLIENT.crt"
+        echo "</cert>"
+        echo "<key>"
+        cat "/etc/openvpn/easy-rsa/pki/private/$CLIENT.key"
+        echo "</key>"
+        echo "<tls-crypt>"
+        cat /etc/openvpn/tls-crypt.key
+        echo "</tls-crypt>"
+    } >> "$homeDir/$CLIENT.ovpn"
+
+    echo ""
+    echo "The configuration file has been written to $homeDir/$CLIENT.ovpn."
+    echo "Download the .ovpn file and import it in your OpenVPN client."
+}
+
+# Function to revoke a client
+function revokeClient() {
+    NUMBEROFCLIENTS=$(tail -n +2 /etc/openvpn/easy-rsa/pki/index.txt | grep -c "^V")
+    if [[ $NUMBEROFCLIENTS == '0' ]]; then
+        echo ""
+        echo "You have no existing clients!"
+        exit 1
+    fi
+
+    echo ""
+    echo "Select the existing client certificate you want to revoke"
+    tail -n +2 /etc/openvpn/easy-rsa/pki/index.txt | grep "^V" | cut -d '=' -f 2 | nl -s ') '
+    until [[ $CLIENTNUMBER -ge 1 && $CLIENTNUMBER -le $NUMBEROFCLIENTS ]]; do
+        read -rp "Select one client [1-$NUMBEROFCLIENTS]: " CLIENTNUMBER
+    done
+    CLIENT=$(tail -n +2 /etc/openvpn/easy-rsa/pki/index.txt | grep "^V" | cut -d '=' -f 2 | sed -n "$CLIENTNUMBER"p)
+    cd /etc/openvpn/easy-rsa/ || return
+    ./easyrsa --batch revoke "$CLIENT"
+    EASYRSA_CRL_DAYS=3650 ./easyrsa gen-crl
+    rm -f /etc/openvpn/crl.pem
+    cp /etc/openvpn/easy-rsa/pki/crl.pem /etc/openvpn/crl.pem
+    chmod 644 /etc/openvpn/crl.pem
+    rm -f "/root/$CLIENT.ovpn"
+    sed -i "/^$CLIENT,.*/d" /etc/openvpn/ipp.txt
+    echo ""
+    echo "Certificate for client $CLIENT revoked."
+}
+
+# Function to remove OpenVPN
+function removeOpenVPN() {
+    echo ""
+    read -rp "Do you really want to remove OpenVPN? [y/n]: " -e -i n REMOVE
+    if [[ $REMOVE == 'y' ]]; then
+        # Stop OpenVPN
+        systemctl stop openvpn-server@server
+        systemctl disable openvpn-server@server
+
+        # Remove OpenVPN
+        yum remove -y openvpn easy-rsa
+
+        # Remove configuration files
+        rm -rf /etc/openvpn
+        rm -f /etc/sysctl.d/99-openvpn.conf
+
+        # Remove firewall rules
+        firewall-cmd --permanent --remove-port=${SERVER_PORT:-1194}/${PROTOCOL:-udp}
+        firewall-cmd --permanent --remove-masquerade
+        firewall-cmd --reload
+
+        # Remove client configurations
+        rm -rf /root/*.ovpn
+
+        echo ""
+        echo "OpenVPN removed!"
+    else
+        echo ""
+        echo "Removal aborted!"
+    fi
+}
+
+# Function to manage OpenVPN
+function manageMenu() {
+    echo "Welcome to OpenVPN Installer for Rocky Linux 9.4!"
+    echo ""
+    echo "What do you want to do?"
+    echo "   1) Add a new user"
+    echo "   2) Revoke existing user"
+    echo "   3) Remove OpenVPN"
+    echo "   4) Exit"
+    until [[ $MENU_OPTION =~ ^[1-4]$ ]]; do
+        read -rp "Select an option [1-4]: " MENU_OPTION
+    done
+
+    case $MENU_OPTION in
+    1)
+        newClient
+        ;;
+    2)
+        revokeClient
+        ;;
+    3)
+        removeOpenVPN
+        ;;
+    4)
+        exit 0
+        ;;
+    esac
+}
+
 # Main function
 function main() {
     check_root
@@ -306,15 +449,22 @@ function main() {
     check_os
     ensure_base_packages
     get_public_ip
-    install_openvpn
-    generate_server_config
-    generate_certificates
-    configure_firewall
-    start_openvpn
-    create_client_config
 
-    log_message "OpenVPN has been installed and configured."
-    log_message "Client configuration is available at /etc/openvpn/clients/client.ovpn"
+    if [[ -e /etc/openvpn/server.conf ]]; then
+        manageMenu
+    else
+        installOpenVPN
+        generate_server_config
+        generate_certificates
+        configure_firewall
+        start_openvpn
+        create_client_config
+        newClient
+
+        echo ""
+        echo "OpenVPN has been installed and configured."
+        echo "You can now use the management menu to add or revoke clients."
+    fi
 }
 
 # Check if a config file is provided
