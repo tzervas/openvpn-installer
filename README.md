@@ -1,45 +1,50 @@
 # OpenVPN Installer for Rocky Linux 9.4
 
-This script automates the installation of OpenVPN on Rocky Linux 9.4, with a focus on FIPS compliance and enhanced security features. It is based on the work of [angristan's OpenVPN installer](https://github.com/angristan/openvpn-install), with modifications to target Rocky Linux 9.4 and OpenVPN 2.5.9 specifically.
+This script automates the installation and configuration of OpenVPN on Rocky Linux 9.4, with a focus on FIPS compliance and enhanced security features. It is based on the work of [angristan's OpenVPN installer](https://github.com/angristan/openvpn-install), with modifications to target Rocky Linux 9.4 and OpenVPN 2.5.9 specifically.
 
 ## Features
 
-- Automated installation of OpenVPN 2.5.9 on Rocky Linux 9.4
+- Automated installation of OpenVPN 2.5.9 (or latest version) on Rocky Linux 9.4
 - FIPS compliance-oriented configurations
 - Enhanced security features
 - Support for both repository and source installations
 - Simplified user management
-- Iptables rules and forwarding managed seamlessly
+- Firewall rules and IP forwarding managed seamlessly
 - Unprivileged mode: run as `nobody`/`nogroup`
-- Variety of DNS resolvers to be pushed to the clients
+- Various DNS resolver options for clients
 - NATed IPv6 support
-- Block DNS leaks on Windows 10
-- Randomised server certificate name
-- Choice to protect clients with a password (private key encryption)
+- DNS leak protection for Windows 10 clients
+- Randomized server certificate name
+- Option to protect clients with a password (private key encryption)
+- Support for configuration files and command-line arguments
+- Automated installation mode
 
 ## Changes from angristan's version
 
 - Targeted specifically for Rocky Linux 9.4
-- Updated to use OpenVPN 2.5.9
+- Updated to use OpenVPN 2.5.9 by default, with option to use latest versions
 - Removed support for other distributions to focus on Rocky Linux
 - Added FIPS compliance considerations
 - Enhanced security configurations
 - Simplified installation process
 - Improved error handling and logging
 - Added support for headless/automated installations
+- Implemented configuration file support
+
+## Prerequisites
+
+- Rocky Linux 9.4 or later
+- Root access
+- Active internet connection
 
 ## Usage
 
-### Installation
+### Basic Installation
 
-1. Download the script using curl or wget:
+1. Download the script:
 
 ```bash
-# Using curl:
-curl -O https://gitlab.com/albdeo_black/openvpn-installer/-/raw/main/openvpn-installer.sh
-
-# Using wget:
-wget https://gitlab.com/albdeo_black/openvpn-installer/-/raw/main/openvpn-installer.sh
+curl -O https://gitlab.com/albedo_black/openvpn-installer/-/raw/main/openvpn-installer.sh
 ```
 
 2. Make the script executable:
@@ -56,86 +61,116 @@ sudo ./openvpn-installer.sh
 
 4. Follow the on-screen prompts to complete the installation.
 
-### Headless Installation
+### Advanced Installation Options
 
-Set the `AUTO_INSTALL` variable, then run the script:
+#### Using Configuration Files
+
+You can use configuration files to set up OpenVPN and manage users. There are two types of configuration files:
+
+1. OpenVPN Configuration (`openvpn-config.conf`)
+2. Users Configuration (`openvpn-users.conf`)
+
+To use these configuration files, pass them as arguments to the script:
 
 ```bash
-AUTO_INSTALL=y ./openvpn-installer.sh openvpn-config.conf openvpn-users.conf
+sudo ./openvpn-installer.sh --openvpn-config /path/to/openvpn-config.conf --users-config /path/to/openvpn-users.conf
+```
 
-# or
+#### Automated Installation
 
-export AUTO_INSTALL=y
-./openvpn-installer.sh openvpn-config.conf openvpn-users.conf
+For headless or automated installations, use the `--auto-install` option:
+
+```bash
+sudo ./openvpn-installer.sh --auto-install
+```
+
+You can combine this with configuration files:
+
+```bash
+sudo ./openvpn-installer.sh --auto-install --openvpn-config /path/to/openvpn-config.conf --users-config /path/to/openvpn-users.conf
+```
+
+If you don't specify the config files in auto-install mode, the script will look for `openvpn-config.conf` and `openvpn-users.conf` in the current directory.
+
+### Configuration File Format
+
+Both configuration files use a simple `key=value` format. Here's an example of `openvpn-config.conf`:
+
+```
+PORT=1194
+PROTOCOL=udp
+DNS1=8.8.8.8
+DNS2=8.8.4.4
+COMPRESSION_ENABLED=n
+CUSTOMIZE_ENC=n
+```
+
+And an example of `openvpn-users.conf`:
+
+```
+CLIENT=client1
+PASS=1
 ```
 
 ### User Management
 
-To add or revoke users, simply run the script again and choose the appropriate options.
+To add or revoke users, you can either:
 
-### Headless User Addition
-
-It's also possible to automate the addition of a new user. Here, the key is to provide the (string) value of the `MENU_OPTION` variable along with the remaining mandatory variables before invoking the script.
-
-The following Bash script adds a new user `foo` to an existing OpenVPN configuration:
-
-```bash
-#!/bin/bash
-export MENU_OPTION="1"
-export CLIENT="foo"
-export PASS="1"
-./openvpn-install.sh
-```
+1. Run the script again and choose the appropriate options from the menu.
+2. Update the `openvpn-users.conf` file and run the script with the `--users-config` option.
 
 ## Security and Encryption
 
-OpenVPN's default settings are pretty weak regarding encryption. This script aims to improve that.
+This script implements several security enhancements over the default OpenVPN settings:
 
 ### TLS Version
 
-With `tls-version-min 1.2` we enforce TLS 1.2, the best protocol currently available for OpenVPN. TLS 1.2 is supported since OpenVPN 2.3.3.
+The script enforces TLS 1.2 as the minimum version, which is the most secure protocol currently available for OpenVPN.
 
-### Certificate
+### Certificates
 
-This script provides ECDSA certificates, which are faster, lighter, and more secure. It defaults to ECDSA with `prime256v1`.
+The script uses ECDSA certificates with the `prime256v1` curve by default, which are faster, lighter, and more secure than RSA certificates.
 
-### Data Channel
+### Data Channel Encryption
 
-By default, OpenVPN uses `AES-256-GCM` for data channel encryption, which provides confidentiality, integrity, and authenticity assurances on the data.
+By default, the script uses `AES-256-GCM` for data channel encryption, providing confidentiality, integrity, and authenticity assurances on the data.
 
-### Control Channel
+### Control Channel Encryption
 
-The script proposes the following options, depending on the certificate:
-
-- ECDSA:
-  - `TLS-ECDHE-ECDSA-WITH-AES-128-GCM-SHA256`
-  - `TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384`
-- RSA:
-  - `TLS-ECDHE-RSA-WITH-AES-128-GCM-SHA256`
-  - `TLS-ECDHE-RSA-WITH-AES-256-GCM-SHA384`
-
-It defaults to `TLS-ECDHE-*-WITH-AES-128-GCM-SHA256`.
+The script uses `TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384` for the control channel, providing strong security for key exchange and authentication.
 
 ### Diffie-Hellman Key Exchange
 
-The script provides the following options:
+The script uses ECDH with the `prime256v1` curve for Diffie-Hellman key exchange.
 
-- ECDH: `prime256v1`/`secp384r1`/`secp521r1` curves
-- DH: `2048`/`3072`/`4096` bits keys
+### Additional Security Measures
 
-It defaults to `prime256v1`.
-
-### `tls-auth` and `tls-crypt`
-
-`tls-crypt` is an OpenVPN 2.4 feature that provides encryption in addition to authentication, and it is more privacy-friendly.
+- `tls-crypt` is used to add an extra layer of security to the TLS channel.
+- The server runs in unprivileged mode as the `nobody` user.
+- DNS leak protection is enabled for Windows 10 clients.
 
 ## Compatibility
 
-The script supports Rocky Linux 9.4 and later. It requires `systemd`.
+This script is designed specifically for Rocky Linux 9.4 and later. It requires `systemd` and `firewalld`.
+
+## Troubleshooting
+
+If you encounter any issues during installation or use, please check the following:
+
+1. Ensure you're running the script as root.
+2. Verify that your system meets the prerequisites.
+3. Check the OpenVPN logs at `/var/log/openvpn/`.
+4. If using configuration files, ensure they are formatted correctly.
+
+For further assistance, please open an issue on the project's GitLab page.
+
+## Contributing
+
+Contributions to this project are welcome. Please fork the repository, make your changes, and submit a pull request.
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](https://gitlab.com/albdeo_black/openvpn-installer/-/raw/main/LICENSE) file for details.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgements
 
@@ -147,4 +182,4 @@ Modified by [Tyler Zervas (albedo_black)](https://gitlab.com/albedo_black) for R
 
 ## Disclaimer
 
-This script is provided as-is, without any warranties or guarantees. Always review the script and understand its operations before running it on your system, especially in production environments.
+This script is provided as-is, without any warranties or guarantees. Always review the script and understand its operations before running it on your system, especially in production environments. Ensure that the use of OpenVPN complies with your organization's security policies and any applicable regulations.
