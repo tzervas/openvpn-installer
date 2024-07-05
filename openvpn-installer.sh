@@ -1,8 +1,9 @@
 #!/bin/bash
 
 # OpenVPN installer for Rocky Linux 9.4
+# Supports OpenVPN versions 2.4.12 through 2.6.11
 # Based on the work of angristan (https://github.com/angristan/openvpn-install)
-# Modified for Rocky Linux 9.4 and OpenVPN 2.5.9 with enhanced security features
+# Modified for Rocky Linux 9.4 and OpenVPN 2.4.12 through 2.6.11 with enhanced security features
 #
 # Original work licensed under MIT License
 # Copyright (c) 2013 Nyr
@@ -17,6 +18,7 @@
 set -euo pipefail
 
 # Global constants
+readonly SUPPORTED_VERSIONS=("2.4.12" "2.4.13" "2.5.0" "2.5.1" "2.5.2" "2.5.3" "2.5.4" "2.5.5" "2.5.6" "2.5.7" "2.5.8" "2.5.9" "2.6.0" "2.6.1" "2.6.2" "2.6.3" "2.6.4" "2.6.5" "2.6.6" "2.6.7" "2.6.8" "2.6.9" "2.6.10" "2.6.11")
 readonly DEFAULT_OPENVPN_VERSION="2.5.9"
 readonly DEFAULT_EASYRSA_VERSION="3.1.6"
 
@@ -30,6 +32,7 @@ EASYRSA_SHA256=""
 OPENVPN_CONFIG=""
 USERS_CONFIG=""
 AUTO_INSTALL=""
+OPENVPN_VERSION=""
 
 # Configuration variables (can be set via config file or CLI)
 IP=""
@@ -77,11 +80,29 @@ function get_public_ip() {
     PUBLIC_IP=$(curl -s https://api.ipify.org)
 }
 
+function version_greater_equal() {
+    printf '%s\n%s' "$2" "$1" | sort -C -V
+}
+
+function detect_openvpn_version() {
+    if command -v openvpn >/dev/null 2>&1; then
+        OPENVPN_VERSION=$(openvpn --version | head -n1 | awk '{print $2}')
+    else
+        OPENVPN_VERSION=$DEFAULT_OPENVPN_VERSION
+    fi
+    log_message "Detected OpenVPN version: $OPENVPN_VERSION"
+
+    if ! [[ " ${SUPPORTED_VERSIONS[@]} " =~ " ${OPENVPN_VERSION} " ]]; then
+        log_message "Warning: Detected version $OPENVPN_VERSION is not in the officially supported list."
+        log_message "The script will attempt to use the closest supported configuration."
+    fi
+}
+
 function get_latest_version_info() {
     local repo=$1
     local redirect_url=$(curl -s -o /dev/null -w "%{redirect_url}" "https://github.com/OpenVPN/${repo}/releases/latest")
     local version=$(echo $redirect_url | grep -oP 'v\K[\d\.]+')
-    
+
     if [[ $repo == "openvpn" ]]; then
         local release_url="https://github.com/OpenVPN/${repo}/releases/download/v${version}/${repo}-${version}.tar.gz"
         local checksum_url="${release_url}.asc"
@@ -114,17 +135,17 @@ function prompt_use_latest_versions() {
 function setup_download_info() {
     if $USE_LATEST_VERSIONS; then
         log_message "Fetching latest version information..."
-        
+
         eval $(get_latest_version_info "openvpn")
         OPENVPN_VERSION=$VERSION
         OPENVPN_DOWNLOAD_URL=$RELEASE_URL
         OPENVPN_CHECKSUM_URL=$CHECKSUM_URL
-        
+
         eval $(get_latest_version_info "easy-rsa")
         EASYRSA_VERSION=$VERSION
         EASYRSA_DOWNLOAD_URL=$RELEASE_URL
         EASYRSA_CHECKSUM_URL=$CHECKSUM_URL
-        
+
         log_message "Using latest versions:"
     else
         log_message "Using default versions:"
@@ -290,10 +311,37 @@ function install_openvpn() {
     # Enable IP Forwarding
     echo 'net.ipv4.ip_forward = 1' > /etc/sysctl.d/99-openvpn.conf
     sysctl --system
+
+    if version_greater_equal "$OPENVPN_VERSION" "2.5.0"; then
+        log_message "Enabling OpenSSL legacy provider..."
+        if [ -f /etc/ssl/openssl.cnf ]; then
+            sed -i '/^\[provider_sect\]/a legacy = legacy_sect' /etc/ssl/openssl.cnf
+            echo -e "\n[legacy_sect]\nactivate = 1" >> /etc/ssl/openssl.cnf
+        fi
+    fi
 }
 
 function generate_server_config() {
     log_message "Generating server config..."
+    local cipher_option=""
+    local tls_cipher_option=""
+    local providers_option=""
+    local auth_token_option=""
+
+    if version_greater_equal "$OPENVPN_VERSION" "2.5.0"; then
+        cipher_option="data-ciphers ${CIPHER:-AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305}"
+        tls_cipher_option="tls-ciphersuites TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256"
+        if version_greater_equal "$OPENVPN_VERSION" "2.5.7"; then
+            providers_option="providers legacy default"
+        fi
+        if version_greater_equal "$OPENVPN_VERSION" "2.5.8"; then
+            auth_token_option="auth-gen-token"
+        fi
+    else
+        cipher_option="cipher ${CIPHER:-AES-256-CBC}"
+        tls_cipher_option="tls-cipher TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384"
+    fi
+
     cat > /etc/openvpn/server.conf <<EOF
 port ${PORT:-1194}
 proto ${PROTOCOL:-udp}
@@ -317,15 +365,25 @@ ca ca.crt
 cert server.crt
 key server.key
 auth SHA256
-cipher ${CIPHER:-AES-256-GCM}
-ncp-ciphers ${CIPHER:-AES-256-GCM}
+$cipher_option
+$tls_cipher_option
 tls-server
 tls-version-min 1.2
-tls-cipher TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384
+$providers_option
+$auth_token_option
 client-config-dir /etc/openvpn/ccd
 status /var/log/openvpn/status.log
 verb 3
 EOF
+
+    if version_greater_equal "$OPENVPN_VERSION" "2.5.0"; then
+        echo "push \"block-outside-dns\"" >> /etc/openvpn/server.conf
+    fi
+
+    if version_greater_equal "$OPENVPN_VERSION" "2.6.0"; then
+        echo "push \"route-ipv6 2000::/3\"" >> /etc/openvpn/server.conf
+        echo "server-ipv6 2001:db8:1::/64" >> /etc/openvpn/server.conf
+    fi
 }
 
 function generate_certificates() {
@@ -350,6 +408,11 @@ function configure_firewall() {
     log_message "Configuring firewall..."
     firewall-cmd --permanent --add-port=${PORT:-1194}/${PROTOCOL:-udp}
     firewall-cmd --permanent --add-masquerade
+    
+    if version_greater_equal "$OPENVPN_VERSION" "2.6.0"; then
+        firewall-cmd --permanent --add-masquerade --ipv6
+    fi
+    
     firewall-cmd --reload
 }
 
@@ -361,6 +424,21 @@ function start_openvpn() {
 
 function create_client_config() {
     log_message "Creating client config..."
+    local cipher_option=""
+    local tls_cipher_option=""
+    local auth_token_option=""
+
+    if version_greater_equal "$OPENVPN_VERSION" "2.5.0"; then
+        cipher_option="data-ciphers ${CIPHER:-AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305}"
+        tls_cipher_option="tls-ciphersuites TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256"
+        if version_greater_equal "$OPENVPN_VERSION" "2.5.8"; then
+            auth_token_option="auth-token-user"
+        fi
+    else
+        cipher_option="cipher ${CIPHER:-AES-256-CBC}"
+        tls_cipher_option="tls-cipher TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384"
+    fi
+
     mkdir -p /etc/openvpn/clients
     cat > /etc/openvpn/clients/client.ovpn <<EOF
 client
@@ -373,11 +451,18 @@ persist-key
 persist-tun
 remote-cert-tls server
 auth SHA256
-cipher ${CIPHER:-AES-256-GCM}
+$cipher_option
+$tls_cipher_option
 ignore-unknown-option block-outside-dns
 block-outside-dns
 verb 3
+$auth_token_option
 EOF
+
+    if version_greater_equal "$OPENVPN_VERSION" "2.6.0"; then
+        echo "pull-filter ignore \"route-ipv6\"" >> /etc/openvpn/clients/client.ovpn
+        echo "pull-filter ignore \"ifconfig-ipv6\"" >> /etc/openvpn/clients/client.ovpn
+    fi
 
     echo "<ca>" >> /etc/openvpn/clients/client.ovpn
     cat /etc/openvpn/ca.crt >> /etc/openvpn/clients/client.ovpn
@@ -466,7 +551,7 @@ function main() {
         # Set default config files if not specified
         OPENVPN_CONFIG=${OPENVPN_CONFIG:-"openvpn-config.conf"}
         USERS_CONFIG=${USERS_CONFIG:-"openvpn-users.conf"}
-        
+
         # Try to load default config files
         [[ -f $OPENVPN_CONFIG ]] && parse_config_file "$OPENVPN_CONFIG"
         [[ -f $USERS_CONFIG ]] && parse_config_file "$USERS_CONFIG"
@@ -478,6 +563,7 @@ function main() {
     check_os
     ensure_base_packages
     get_public_ip
+    detect_openvpn_version
     prompt_use_latest_versions
     setup_download_info
     install_openvpn
@@ -487,7 +573,7 @@ function main() {
     start_openvpn
     create_client_config
 
-    log_message "OpenVPN has been installed and configured."
+    log_message "OpenVPN $OPENVPN_VERSION has been installed and configured."
     log_message "Client configuration is available at /etc/openvpn/clients/client.ovpn"
 }
 
