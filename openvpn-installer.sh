@@ -17,15 +17,30 @@
 set -euo pipefail
 
 # Global constants
-readonly OPENVPN_VERSION="2.5.9"
-readonly EASYRSA_VERSION="3.1.6"
+readonly DEFAULT_OPENVPN_VERSION="2.5.9"
+readonly DEFAULT_EASYRSA_VERSION="3.1.6"
 
 # Global variables
 USE_LATEST_VERSIONS=false
+SKIP_CHECKSUM=false
 OPENVPN_DOWNLOAD_URL=""
 EASYRSA_DOWNLOAD_URL=""
 OPENVPN_SHA256=""
 EASYRSA_SHA256=""
+OPENVPN_CONFIG=""
+USERS_CONFIG=""
+AUTO_INSTALL=""
+
+# Configuration variables (can be set via config file or CLI)
+IP=""
+PUBLIC_IP=""
+PROTOCOL=""
+PORT=""
+DNS=""
+COMPRESSION_ENABLED=""
+CUSTOMIZE_ENC=""
+CLIENT=""
+PASS=""
 
 # Utility functions
 function log_message() {
@@ -59,70 +74,98 @@ function check_os() {
 }
 
 function get_public_ip() {
-    IP=$(curl -s https://api.ipify.org)
+    PUBLIC_IP=$(curl -s https://api.ipify.org)
 }
 
-function get_latest_openvpn_version() {
-    local latest_version
-    latest_version=$(curl -s https://api.github.com/repos/OpenVPN/openvpn/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')
-    if [[ -n "$latest_version" ]]; then
-        echo "${latest_version#v}"
+function get_latest_version_info() {
+    local repo=$1
+    local redirect_url=$(curl -s -o /dev/null -w "%{redirect_url}" "https://github.com/OpenVPN/${repo}/releases/latest")
+    local version=$(echo $redirect_url | grep -oP 'v\K[\d\.]+')
+    
+    if [[ $repo == "openvpn" ]]; then
+        local release_url="https://github.com/OpenVPN/${repo}/releases/download/v${version}/${repo}-${version}.tar.gz"
+        local checksum_url="${release_url}.asc"
+        local source_url="https://github.com/OpenVPN/${repo}/archive/refs/tags/v${version}.tar.gz"
+    elif [[ $repo == "easy-rsa" ]]; then
+        local release_url="https://github.com/OpenVPN/${repo}/releases/download/v${version}/EasyRSA-${version}.tgz"
+        local checksum_url="${release_url}.sig"
+        local source_url="https://github.com/OpenVPN/${repo}/archive/refs/tags/v${version}.tar.gz"
     else
-        echo "$OPENVPN_VERSION"
+        log_message "Unknown repository: $repo" >&2
+        return 1
     fi
-}
 
-function get_latest_easyrsa_version() {
-    local latest_version
-    latest_version=$(curl -s https://api.github.com/repos/OpenVPN/easy-rsa/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')
-    if [[ -n "$latest_version" ]]; then
-        echo "${latest_version#v}"
-    else
-        echo "$EASYRSA_VERSION"
-    fi
+    echo "VERSION=$version"
+    echo "RELEASE_URL=$release_url"
+    echo "CHECKSUM_URL=$checksum_url"
+    echo "SOURCE_URL=$source_url"
 }
 
 function prompt_use_latest_versions() {
-    read -p "Do you want to use the latest versions of OpenVPN and EasyRSA? (y/n): " response
-    case $response in
-        [Yy]* ) USE_LATEST_VERSIONS=true;;
-        * ) USE_LATEST_VERSIONS=false;;
-    esac
-}
-
-function get_sha256_checksum() {
-    local url=$1
-    local filename=$(basename "$url")
-    local checksum=$(curl -sL "$url.sha256" | awk '{print $1}')
-    if [[ -z "$checksum" ]]; then
-        log_message "Failed to retrieve SHA256 checksum for $filename" >&2
-        return 1
+    if [[ $AUTO_INSTALL != "y" ]]; then
+        read -p "Do you want to use the latest versions of OpenVPN and EasyRSA? (y/n): " response
+        case $response in
+            [Yy]* ) USE_LATEST_VERSIONS=true;;
+            * ) USE_LATEST_VERSIONS=false;;
+        esac
     fi
-    echo "$checksum"
 }
 
 function setup_download_info() {
     if $USE_LATEST_VERSIONS; then
-        OPENVPN_VERSION=$(get_latest_openvpn_version)
-        EASYRSA_VERSION=$(get_latest_easyrsa_version)
+        log_message "Fetching latest version information..."
+        
+        eval $(get_latest_version_info "openvpn")
+        OPENVPN_VERSION=$VERSION
+        OPENVPN_DOWNLOAD_URL=$RELEASE_URL
+        OPENVPN_CHECKSUM_URL=$CHECKSUM_URL
+        
+        eval $(get_latest_version_info "easy-rsa")
+        EASYRSA_VERSION=$VERSION
+        EASYRSA_DOWNLOAD_URL=$RELEASE_URL
+        EASYRSA_CHECKSUM_URL=$CHECKSUM_URL
+        
         log_message "Using latest versions:"
     else
         log_message "Using default versions:"
+        OPENVPN_VERSION=$DEFAULT_OPENVPN_VERSION
+        EASYRSA_VERSION=$DEFAULT_EASYRSA_VERSION
+        OPENVPN_DOWNLOAD_URL="https://swupdate.openvpn.org/community/releases/openvpn-${OPENVPN_VERSION}.tar.gz"
+        EASYRSA_DOWNLOAD_URL="https://github.com/OpenVPN/easy-rsa/releases/download/v${EASYRSA_VERSION}/EasyRSA-${EASYRSA_VERSION}.tgz"
+        OPENVPN_CHECKSUM_URL="${OPENVPN_DOWNLOAD_URL}.asc"
+        EASYRSA_CHECKSUM_URL="${EASYRSA_DOWNLOAD_URL}.sig"
     fi
 
     log_message "OpenVPN version: $OPENVPN_VERSION"
     log_message "EasyRSA version: $EASYRSA_VERSION"
 
-    OPENVPN_DOWNLOAD_URL="https://swupdate.openvpn.org/community/releases/openvpn-${OPENVPN_VERSION}.tar.gz"
-    EASYRSA_DOWNLOAD_URL="https://github.com/OpenVPN/easy-rsa/releases/download/v${EASYRSA_VERSION}/EasyRSA-${EASYRSA_VERSION}.tgz"
+    if ! $SKIP_CHECKSUM; then
+        OPENVPN_SHA256=$(get_sha256_checksum "$OPENVPN_CHECKSUM_URL")
+        EASYRSA_SHA256=$(get_sha256_checksum "$EASYRSA_CHECKSUM_URL")
 
-    OPENVPN_SHA256=$(get_sha256_checksum "$OPENVPN_DOWNLOAD_URL")
-    EASYRSA_SHA256=$(get_sha256_checksum "$EASYRSA_DOWNLOAD_URL")
-
-    if [[ -z "$OPENVPN_SHA256" || -z "$EASYRSA_SHA256" ]]; then
-        log_message "Failed to retrieve checksums. Exiting." >&2
-        exit 1
+        if [[ -z "$OPENVPN_SHA256" || -z "$EASYRSA_SHA256" ]]; then
+            if [[ $AUTO_INSTALL == "y" ]]; then
+                log_message "Failed to retrieve checksums. Exiting." >&2
+                exit 1
+            else
+                read -p "Failed to retrieve checksums. Continue without checksum verification? (y/n): " response
+                case $response in
+                    [Yy]* ) SKIP_CHECKSUM=true;;
+                    * ) exit 1;;
+                esac
+            fi
+        fi
     fi
+}
+
+function get_sha256_checksum() {
+    local url=$1
+    local checksum=$(curl -sL "$url" | gpg --verify - 2>&1 | grep -oP 'SHA256 checksum: \K[a-f0-9]{64}')
+    if [[ -z "$checksum" ]]; then
+        log_message "Failed to retrieve or verify SHA256 checksum from $url" >&2
+        return 1
+    fi
+    echo "$checksum"
 }
 
 function ensure_base_packages() {
@@ -135,6 +178,7 @@ openssl
 dnf-plugins-core
 tar
 which
+gnupg
 EOF
 
     dnf install -y "${packages[@]}"
@@ -160,16 +204,18 @@ function secure_download() {
         return 1
     fi
 
-    log_message "Verifying $output..."
-    local computed_hash=$(sha256sum "$output" | cut -d' ' -f1)
+    if ! $SKIP_CHECKSUM; then
+        log_message "Verifying $output..."
+        local computed_hash=$(sha256sum "$output" | cut -d' ' -f1)
 
-    if [[ "$computed_hash" != "$expected_hash" ]]; then
-        log_message "Hash verification failed for $output" >&2
-        rm -f "$output"
-        return 1
+        if [[ "$computed_hash" != "$expected_hash" ]]; then
+            log_message "Hash verification failed for $output" >&2
+            rm -f "$output"
+            return 1
+        fi
     fi
 
-    log_message "$output downloaded and verified successfully"
+    log_message "$output downloaded successfully"
 }
 
 function install_from_source() {
@@ -182,7 +228,7 @@ function install_from_source() {
 
     tar xzf openvpn-$OPENVPN_VERSION.tar.gz
     cd openvpn-$OPENVPN_VERSION
-    ../conf.d/configure --enable-lzo --enable-iproute2
+    ./configure --enable-lzo --enable-iproute2
     make
     make install
     cd ..
@@ -202,7 +248,7 @@ function install_from_source() {
 
 function install_from_repo() {
     log_message "Installing OpenVPN and Easy-RSA from repositories..."
-    dnf install -y openvpn-$OPENVPN_VERSION easy-rsa-$EASYRSA_VERSION
+    dnf install -y openvpn easy-rsa
 }
 
 function install_build_tools() {
@@ -212,14 +258,18 @@ function install_build_tools() {
 }
 
 function choose_install_method() {
-    echo "Install OpenVPN from: "
-    echo "1) Repositories (default)"
-    echo "2) Source"
-    read -p "Enter choice [1-2]: " install_choice
-    case ${install_choice:-1} in
-        2) return 2 ;;
-        *) return 1 ;;
-    esac
+    if [[ $AUTO_INSTALL != "y" ]]; then
+        echo "Install OpenVPN from: "
+        echo "1) Repositories (default)"
+        echo "2) Source"
+        read -p "Enter choice [1-2]: " install_choice
+        case ${install_choice:-1} in
+            2) return 2 ;;
+            *) return 1 ;;
+        esac
+    else
+        return 1  # Default to repository install for auto-install
+    fi
 }
 
 function install_openvpn() {
@@ -227,12 +277,10 @@ function install_openvpn() {
 
     if [[ -z ${INSTALL_METHOD:-} ]]; then
         choose_install_method
-        install_choice=$?
-    else
-        install_choice=$INSTALL_METHOD
+        INSTALL_METHOD=$?
     fi
 
-    if [[ $install_choice -eq 2 ]]; then
+    if [[ $INSTALL_METHOD -eq 2 ]]; then
         install_build_tools
         install_from_source
     else
@@ -247,7 +295,7 @@ function install_openvpn() {
 function generate_server_config() {
     log_message "Generating server config..."
     cat > /etc/openvpn/server.conf <<EOF
-port ${SERVER_PORT:-1194}
+port ${PORT:-1194}
 proto ${PROTOCOL:-udp}
 dev tun
 user nobody
@@ -300,7 +348,7 @@ function generate_certificates() {
 
 function configure_firewall() {
     log_message "Configuring firewall..."
-    firewall-cmd --permanent --add-port=${SERVER_PORT:-1194}/${PROTOCOL:-udp}
+    firewall-cmd --permanent --add-port=${PORT:-1194}/${PROTOCOL:-udp}
     firewall-cmd --permanent --add-masquerade
     firewall-cmd --reload
 }
@@ -318,7 +366,7 @@ function create_client_config() {
 client
 dev tun
 proto ${PROTOCOL:-udp}
-remote $IP ${SERVER_PORT:-1194}
+remote ${PUBLIC_IP} ${PORT:-1194}
 resolv-retry infinite
 nobind
 persist-key
@@ -360,7 +408,70 @@ function check_version() {
     fi
 }
 
+function parse_config_file() {
+    local config_file=$1
+    if [[ -f "$config_file" ]]; then
+        log_message "Loading configuration from $config_file"
+        while IFS='=' read -r key value; do
+            if [[ ! $key =~ ^[[:space:]]*# && -n $value ]]; then
+                value=$(echo "$value" | tr -d '"' | tr -d "'")
+                export "$key=$value"
+                log_message "Loaded: $key=$value"
+            fi
+        done < "$config_file"
+    else
+        log_message "Config file $config_file not found. Using defaults or CLI options."
+    fi
+}
+
+function parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --openvpn-config)
+                OPENVPN_CONFIG="$2"
+                shift 2
+                ;;
+            --users-config)
+                USERS_CONFIG="$2"
+                shift 2
+                ;;
+            --auto-install)
+                AUTO_INSTALL="y"
+                shift
+                ;;
+            --no-checksum)
+                SKIP_CHECKSUM=true
+                shift
+                ;;
+            *)
+                log_message "Unknown option: $1" >&2
+                exit 1
+                ;;
+        esac
+    done
+}
+
 function main() {
+    parse_arguments "$@"
+
+    if [[ -n $OPENVPN_CONFIG ]]; then
+        parse_config_file "$OPENVPN_CONFIG"
+    fi
+
+    if [[ -n $USERS_CONFIG ]]; then
+        parse_config_file "$USERS_CONFIG"
+    fi
+
+    if [[ $AUTO_INSTALL == "y" ]]; then
+        # Set default config files if not specified
+        OPENVPN_CONFIG=${OPENVPN_CONFIG:-"openvpn-config.conf"}
+        USERS_CONFIG=${USERS_CONFIG:-"openvpn-users.conf"}
+        
+        # Try to load default config files
+        [[ -f $OPENVPN_CONFIG ]] && parse_config_file "$OPENVPN_CONFIG"
+        [[ -f $USERS_CONFIG ]] && parse_config_file "$USERS_CONFIG"
+    fi
+
     check_version
     check_root
     check_tun
@@ -383,9 +494,5 @@ function main() {
 # Set trap for cleanup
 trap cleanup EXIT
 
-# Check if a config file is provided
-if [[ -f "$1" ]]; then
-    source "$1"
-fi
-
-main
+# Run the main function with all script arguments
+main "$@"
