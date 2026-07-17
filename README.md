@@ -1,5 +1,10 @@
 # OpenVPN Installer for Rocky Linux 9.4
 
+<!-- FLEET-BADGES:BEGIN -->
+[![CI](https://github.com/tzervas/openvpn-installer/actions/workflows/fleet-ci.yml/badge.svg?branch=main)](https://github.com/tzervas/openvpn-installer/actions/workflows/fleet-ci.yml?query=branch%3Amain)
+[![Security](https://github.com/tzervas/openvpn-installer/actions/workflows/fleet-security.yml/badge.svg?branch=main)](https://github.com/tzervas/openvpn-installer/actions/workflows/fleet-security.yml?query=branch%3Amain)
+<!-- FLEET-BADGES:END -->
+
 This script automates the installation and configuration of OpenVPN on Rocky Linux 9.4, with a focus on enhanced security features and support for OpenVPN versions 2.4.12 through 2.6.11. It is based on the work of [angristan's OpenVPN installer](https://github.com/angristan/openvpn-install), with significant modifications to target Rocky Linux 9.4 and provide version-specific configurations.
 
 ## Features
